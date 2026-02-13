@@ -1,0 +1,15 @@
+[Unit]
+Description=Kwekha Telegram Control Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/etc/kwekha
+EnvironmentFile=/etc/kwekha/telegram.env
+ExecStart=/usr/bin/flock -n /run/kwekha-telegram.lock /usr/local/bin/kwekha-telegram
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
