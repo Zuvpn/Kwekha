@@ -1,0 +1,10 @@
+[Unit]
+Description=Kwekha Scheduler (restart gost-kwekha services)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/kwekha-scheduler
+StandardOutput=append:/var/log/kwekha/scheduler.log
+StandardError=append:/var/log/kwekha/scheduler.log
