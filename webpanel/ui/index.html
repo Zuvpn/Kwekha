@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="fa">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Kwekha Web Panel</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="topbar">
+    <div class="brand">
+      <img src="/static/logo.svg" alt="Kwekha" class="logo"/>
+      <div>
+        <div class="title">Kwekha Web Panel</div>
+        <div class="subtitle">Tunnel & Service Manager • Logs • Stats</div>
+      </div>
+    </div>
+    <div class="right">
+      <span id="healthBadge" class="badge">…</span>
+      <button class="btn ghost" id="logoutBtn">Logout</button>
+    </div>
+  </div>
+
+  <div class="container">
+    <!-- Login -->
+    <div id="loginCard" class="card hidden">
+      <h2>ورود</h2>
+      <p class="muted">توکن ۲۵ رقمی را وارد کنید. بازیابی: <code>sudo cat /etc/kwekha/web.conf | grep TOKEN=</code></p>
+      <div class="row">
+        <input id="tokenInput" class="input" inputmode="numeric" placeholder="25-digit token" maxlength="64">
+        <button class="btn primary" id="loginBtn">Login</button>
+      </div>
+      <div class="muted small">Header: <code>Authorization: Bearer TOKEN</code></div>
+    </div>
+
+    <!-- App -->
+    <div id="appShell" class="hidden">
+      <div class="tabs">
+        <button class="tab active" data-tab="services">Services</button>
+        <button class="tab" data-tab="create">Create Tunnel</button>
+        <button class="tab" data-tab="stats">Stats</button>
+        <button class="tab" data-tab="settings">Settings</button>
+      </div>
+
+      <!-- Services -->
+      <div id="tab-services" class="card tabpane">
+        <div class="row space">
+          <h3 style="margin:0">Services</h3>
+          <div class="row">
+            <label class="muted">Auto refresh</label>
+            <select id="refreshSel" class="select">
+              <option value="0">Off</option>
+              <option value="5">5s</option>
+              <option value="10" selected>10s</option>
+              <option value="30">30s</option>
+            </select>
+            <button class="btn" id="refreshBtn">Refresh</button>
+          </div>
+        </div>
+
+        <div class="tableWrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Service</th>
+                <th>Status</th>
+                <th>Enabled</th>
+                <th>Actions</th>
+                <th>Inspect</th>
+              </tr>
+            </thead>
+            <tbody id="svcBody">
+              <tr><td colspan="5" class="muted">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Create -->
+      <div id="tab-create" class="card tabpane hidden">
+        <div class="row space">
+          <h3 style="margin:0">Create Tunnel (Wizard)</h3>
+          <span class="muted small">این بخش سرویس جدید systemd می‌سازد.</span>
+        </div>
+
+        <div class="grid">
+          <div>
+            <label class="lbl">Service name</label>
+            <input id="c_name" class="input" placeholder="مثلاً main-tunnel">
+            <div class="muted small">فقط حروف کوچک/عدد/خط تیره</div>
+          </div>
+
+          <div>
+            <label class="lbl">Role</label>
+            <select id="c_role" class="select">
+              <option value="client">Client (ایران ➜ خارج)</option>
+              <option value="server">Server (خارج)</option>
+            </select>
+          </div>
+
+          <div>
+            <label class="lbl">Transport</label>
+            <select id="c_scheme" class="select"></select>
+            <div class="muted small">⭐ پیشنهاد شده برای V2Ray: relay+wss</div>
+          </div>
+
+          <div>
+            <label class="lbl">Peer (IP:PORT)</label>
+            <input id="c_peer" class="input" placeholder="مثلاً 212.87.x.x:2053">
+            <div class="muted small">برای Server هم می‌تواند فقط :PORT باشد</div>
+          </div>
+
+          <div>
+            <label class="lbl">Ports</label>
+            <input id="c_ports" class="input" placeholder="80,443,2053">
+            <div class="muted small">پیش‌فرض: PORT ➜ 127.0.0.1:PORT</div>
+          </div>
+
+          <div>
+            <label class="lbl">Forward destination</label>
+            <select id="c_destmode" class="select">
+              <option value="local">Localhost (127.0.0.1)</option>
+              <option value="remote">Remote host (سرور مقابل)</option>
+            </select>
+          </div>
+
+          <div id="destHostWrap" class="hidden">
+            <label class="lbl">Dest host</label>
+            <input id="c_desthost" class="input" placeholder="مثلاً 212.87.x.x">
+            <div class="muted small">اگر Remote انتخاب شد: PORT ➜ DEST_HOST:PORT</div>
+          </div>
+
+          <div>
+            <label class="lbl">Tunnel ID (UUID)</label>
+            <div class="row">
+              <input id="c_tid" class="input" placeholder="Auto-generate">
+              <button class="btn" id="genTidBtn" type="button">Generate</button>
+            </div>
+            <div class="muted small">برای جلوگیری از خطای invalid UUID، همیشه UUID معتبر لازم است.</div>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:12px">
+          <button class="btn primary" id="createBtn" type="button">Create & Start</button>
+          <button class="btn" id="previewBtn" type="button">Preview</button>
+        </div>
+
+        <div class="cardSub">
+          <div class="row space">
+            <div class="muted small">Preview</div>
+            <button class="btn ghost" id="copyPreviewBtn" type="button">Copy</button>
+          </div>
+          <pre id="createPreview" class="pre">—</pre>
+        </div>
+      </div>
+
+      <!-- Stats -->
+      <div id="tab-stats" class="card tabpane hidden">
+        <div class="row space">
+          <h3 style="margin:0">System Stats</h3>
+          <div class="row">
+            <label class="muted">Auto refresh</label>
+            <select id="statsSel" class="select">
+              <option value="0">Off</option>
+              <option value="2">2s</option>
+              <option value="5" selected>5s</option>
+              <option value="10">10s</option>
+            </select>
+            <button class="btn" id="statsBtn">Refresh</button>
+          </div>
+        </div>
+
+        <div class="statsGrid">
+          <div class="stat">
+            <div class="muted small">CPU</div>
+            <div class="statVal" id="cpuVal">—</div>
+          </div>
+          <div class="stat">
+            <div class="muted small">RAM</div>
+            <div class="statVal" id="ramVal">—</div>
+          </div>
+          <div class="stat">
+            <div class="muted small">Network</div>
+            <div class="statVal" id="netVal">—</div>
+          </div>
+          <div class="stat">
+            <div class="muted small">Connections</div>
+            <div class="statVal" id="connVal">—</div>
+          </div>
+        </div>
+
+        <div class="cardSub">
+          <div class="muted small">Details</div>
+          <pre id="statsRaw" class="pre">—</pre>
+        </div>
+      </div>
+
+      <!-- Settings -->
+      <div id="tab-settings" class="card tabpane hidden">
+        <h3 style="margin-top:0">Settings</h3>
+
+        <div class="grid">
+          <div>
+            <label class="lbl">Health check interval</label>
+            <select id="hcSel" class="select">
+              <option value="0">Off</option>
+              <option value="1">1 min</option>
+              <option value="2">2 min</option>
+              <option value="5">5 min</option>
+              <option value="10">10 min</option>
+              <option value="15">15 min</option>
+              <option value="30">30 min</option>
+              <option value="60">60 min</option>
+            </select>
+            <div class="muted small">بین ۱ دقیقه تا ۱ ساعت. بدون وابستگی به ربات.</div>
+          </div>
+
+          <div class="row" style="align-items:flex-end">
+            <button class="btn primary" id="saveHcBtn" type="button">Save</button>
+            <button class="btn" id="runHcBtn" type="button">Run now</button>
+          </div>
+        </div>
+
+        <div class="cardSub">
+          <div class="muted small">Current config</div>
+          <pre id="settingsOut" class="pre">—</pre>
+        </div>
+      </div>
+    </div>
+
+    <!-- Output -->
+    <div class="card">
+      <div class="row space">
+        <h3 style="margin:0">Output</h3>
+        <button class="btn" id="copyOutBtn">Copy</button>
+      </div>
+      <pre id="out" class="pre">—</pre>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
