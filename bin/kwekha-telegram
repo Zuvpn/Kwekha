@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# single instance lock
+exec 200>/run/kwekha-telegram.lock
+flock -n 200 || exit 0
+
+: "${BOT_TOKEN:?BOT_TOKEN missing}"
+API="https://api.telegram.org/bot${BOT_TOKEN}"
+
+STATE_DIR="/var/lib/kwekha"
+OFFSET_FILE="$STATE_DIR/telegram.offset"
+mkdir -p "$STATE_DIR"
+
+OFFSET="$(cat "$OFFSET_FILE" 2>/dev/null || echo 0)"
+
+send_message() {
+  curl -fsS -X POST "$API/sendMessage"     -d "chat_id=$1"     --data-urlencode "text=$2"     -d "parse_mode=HTML" >/dev/null
+}
+
+answer_cb() {
+  curl -fsS -X POST "$API/answerCallbackQuery"     -d "callback_query_id=$1" >/dev/null || true
+}
+
+parse_updates() {
+python3 - <<'PY'
+import sys, json
+raw=sys.stdin.read().strip()
+if not raw:
+    sys.exit(0)
+try:
+    d=json.loads(raw)
+except Exception:
+    sys.exit(0)
+for u in d.get("result", []):
+    uid = u.get("update_id", "")
+    if "message" in u:
+        chat = u["message"]["chat"]["id"]
+        text = u["message"].get("text", "")
+        print(f"{uid}\t{chat}\tmsg\t{text}\t-")
+    elif "callback_query" in u:
+        chat = u["callback_query"]["message"]["chat"]["id"]
+        data = u["callback_query"].get("data", "")
+        cbid = u["callback_query"].get("id", "")
+        print(f"{uid}\t{chat}\tcb\t{data}\t{cbid}")
+PY
+}
+
+while true; do
+  upd="$(curl -fsS "$API/getUpdates?timeout=60&offset=$OFFSET")" || continue
+
+  while IFS=$'\t' read -r uid chat_id kind payload cb_id; do
+    [[ -z "$uid" ]] && continue
+    OFFSET=$((uid+1))
+    echo "$OFFSET" > "$OFFSET_FILE"
+
+    if [[ "$kind" == "msg" ]]; then
+      if [[ "$payload" == "/start" ]]; then
+        send_message "$chat_id" "ربات فعال است ✅"
+      fi
+    elif [[ "$kind" == "cb" ]]; then
+      answer_cb "$cb_id"
+      send_message "$chat_id" "دکمه فشرده شد ✅"
+    fi
+  done < <(echo "$upd" | parse_updates)
+done
