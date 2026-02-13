@@ -1,0 +1,264 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONF="/etc/kwekha/telegram.conf"
+LOG="/var/log/kwekha/telegram.log"
+mkdir -p /var/log/kwekha /etc/kwekha
+
+ts(){ date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+
+if [[ ! -f "$CONF" ]]; then
+  echo "[$(ts)] telegram.conf not found at $CONF" | tee -a "$LOG"
+  echo "Create it via CLI: Telegram: Setup" | tee -a "$LOG"
+  exit 1
+fi
+
+# shellcheck disable=SC1090
+source "$CONF"
+
+: "${BOT_TOKEN:?BOT_TOKEN missing}"
+DENY_MESSAGE="${DENY_MESSAGE:-شما مجاز نیستید}"
+API="https://api.telegram.org/bot${BOT_TOKEN}"
+
+declare -A ALLOW ADMIN
+IFS=',' read -ra _a <<< "${ALLOWED_IDS:-}"
+for x in "${_a[@]}"; do x="${x// /}"; [[ -n "$x" ]] && ALLOW["$x"]=1; done
+IFS=',' read -ra _b <<< "${ADMIN_IDS:-}"
+for x in "${_b[@]}"; do x="${x// /}"; [[ -n "$x" ]] && ADMIN["$x"]=1; done
+
+send_message() {
+  local chat_id="$1" text="$2" reply_markup="${3:-}"
+  if [[ -n "$reply_markup" ]]; then
+    curl -fsS -X POST "$API/sendMessage" -d "chat_id=$chat_id" --data-urlencode "text=$text" -d "parse_mode=HTML" --data-urlencode "reply_markup=$reply_markup" >/dev/null
+  else
+    curl -fsS -X POST "$API/sendMessage" -d "chat_id=$chat_id" --data-urlencode "text=$text" -d "parse_mode=HTML" >/dev/null
+  fi
+}
+
+answer_cb() {
+  local cb_id="$1" text="${2:-OK}"
+  curl -fsS -X POST "$API/answerCallbackQuery" -d "callback_query_id=$cb_id" --data-urlencode "text=$text" >/dev/null || true
+}
+
+deny_if_needed() {
+  local chat_id="$1"
+  if [[ -z "${ALLOW[$chat_id]:-}" ]]; then
+    send_message "$chat_id" "$DENY_MESSAGE"
+    return 1
+  fi
+  return 0
+}
+
+is_admin() { [[ -n "${ADMIN[$1]:-}" ]]; }
+
+home_markup() { cat <<'JSON'
+{"inline_keyboard":[
+  [{"text":"🧩 Services","callback_data":"menu:services"},{"text":"🩺 Scheduler","callback_data":"menu:sched"}],
+  [{"text":"🏠 منوی اصلی","callback_data":"menu:home"}]
+]}
+JSON
+}
+
+services_markup() { cat <<'JSON'
+{"inline_keyboard":[
+  [{"text":"📋 List","callback_data":"svc:list"},{"text":"▶️ Start","callback_data":"svc:startpick"}],
+  [{"text":"⏹ Stop","callback_data":"svc:stoppick"},{"text":"🔁 Restart","callback_data":"svc:restartpick"}],
+  [{"text":"📄 Logs","callback_data":"svc:logpick"},{"text":"🧹 Remove (Admin)","callback_data":"svc:removepick"}],
+  [{"text":"🏠 منوی اصلی","callback_data":"menu:home"}]
+]}
+JSON
+}
+
+sched_markup() { cat <<'JSON'
+{"inline_keyboard":[
+  [{"text":"⏱ 1m","callback_data":"sch:int:1min"},{"text":"5m","callback_data":"sch:int:5min"},{"text":"10m","callback_data":"sch:int:10min"}],
+  [{"text":"30m","callback_data":"sch:int:30min"},{"text":"1h","callback_data":"sch:int:1h"},{"text":"24h","callback_data":"sch:int:24h"}],
+  [{"text":"✅ Enable","callback_data":"sch:enable"},{"text":"⛔ Disable","callback_data":"sch:disable"},{"text":"▶️ Run now","callback_data":"sch:run"}],
+  [{"text":"ℹ️ Status","callback_data":"sch:status"},{"text":"🏠 منوی اصلی","callback_data":"menu:home"}]
+]}
+JSON
+}
+
+get_services() {
+  systemctl list-units --type=service --all --no-legend | awk '{print $1}' | grep -E '^gost-kwekha-.*\.service$' || true
+}
+
+svc_buttons_markup() {
+  local prefix="$1"
+  mapfile -t svcs < <(get_services)
+  if [[ ${#svcs[@]} -eq 0 ]]; then
+    echo '{"inline_keyboard":[[{"text":"(هیچ سرویسی نیست)","callback_data":"noop"}],[{"text":"🏠 منوی اصلی","callback_data":"menu:home"}]]}'
+    return
+  fi
+  local kb='{"inline_keyboard":['
+  local n=0
+  for s in "${svcs[@]}"; do
+    ((n++))
+    [[ $n -gt 20 ]] && break
+    kb+='[{"text":"'"${s//\"/}"'","callback_data":"'"$prefix$s"'"}],'
+  done
+  kb+='[{"text":"🏠 منوی اصلی","callback_data":"menu:home"}]]}'
+  echo "$kb"
+}
+
+ensure_scheduler_units() {
+  mkdir -p /etc/systemd/system /var/log/kwekha /etc/kwekha
+  if [[ ! -f /etc/systemd/system/kwekha-scheduler.service ]]; then
+    cat > /etc/systemd/system/kwekha-scheduler.service <<'EOF'
+[Unit]
+Description=Kwekha Scheduler (restart gost-kwekha services)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/kwekha-scheduler
+StandardOutput=append:/var/log/kwekha/scheduler.log
+StandardError=append:/var/log/kwekha/scheduler.log
+EOF
+  fi
+  if [[ ! -f /etc/systemd/system/kwekha-scheduler.timer ]]; then
+    cat > /etc/systemd/system/kwekha-scheduler.timer <<'EOF'
+[Unit]
+Description=Kwekha Scheduler Timer
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1h
+Unit=kwekha-scheduler.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+  fi
+  systemctl daemon-reload
+}
+
+scheduler_set_interval() {
+  local interval="$1"
+  mkdir -p /etc/kwekha
+  cat > /etc/kwekha/scheduler.conf <<EOF
+MODE=force
+INTERVAL=${interval}
+EOF
+  cat > /etc/systemd/system/kwekha-scheduler.timer <<EOF
+[Unit]
+Description=Kwekha Scheduler Timer
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=${interval}
+Unit=kwekha-scheduler.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload
+  systemctl restart kwekha-scheduler.timer 2>/dev/null || true
+}
+
+OFFSET=0
+echo "[$(ts)] bot started" >>"$LOG"
+
+while true; do
+  upd="$(curl -fsS "$API/getUpdates?timeout=60&offset=$OFFSET" || true)"
+  ids="$(echo "$upd" | grep -o '"update_id":[0-9]*' | grep -o '[0-9]*' || true)"
+  while read -r uid; do
+    [[ -z "$uid" ]] && continue
+    OFFSET=$((uid+1))
+
+    chat_id="$(echo "$upd" | awk -v id="$uid" 'BEGIN{RS="{"} $0~"\"update_id\":"id {print $0}' | grep -o '"chat":{"id":[-0-9]*' | head -n1 | grep -o '[-0-9]*' || true)"
+    [[ -z "$chat_id" ]] && continue
+
+    if echo "$upd" | awk -v id="$uid" 'BEGIN{RS="{"} $0~"\"update_id\":"id {print $0}' | grep -q '"text":"\/start"'; then
+      if deny_if_needed "$chat_id"; then
+        send_message "$chat_id" "<b>Kwekha</b>\nانتخاب کنید:" "$(home_markup)"
+      fi
+      continue
+    fi
+
+    cb_id="$(echo "$upd" | awk -v id="$uid" 'BEGIN{RS="{"} $0~"\"update_id\":"id {print $0}' | grep -o '"id":"[^"]*"' | head -n1 | cut -d'"' -f4 || true)"
+    data="$(echo "$upd" | awk -v id="$uid" 'BEGIN{RS="{"} $0~"\"update_id\":"id {print $0}' | grep -o '"data":"[^"]*"' | head -n1 | cut -d'"' -f4 || true)"
+
+    [[ -z "$data" ]] && continue
+    if ! deny_if_needed "$chat_id"; then
+      answer_cb "$cb_id" "$DENY_MESSAGE"
+      continue
+    fi
+    answer_cb "$cb_id" "OK"
+
+    case "$data" in
+      menu:home) send_message "$chat_id" "<b>Kwekha</b>\nانتخاب کنید:" "$(home_markup)" ;;
+      menu:services) send_message "$chat_id" "<b>Services</b>" "$(services_markup)" ;;
+      menu:sched) send_message "$chat_id" "<b>Scheduler</b>\nMode: <b>FORCE</b>" "$(sched_markup)" ;;
+
+      svc:list)
+        svcs="$(get_services)"
+        send_message "$chat_id" "<b>Services</b>\n<pre>${svcs:-هیچ سرویسی نیست}</pre>" '{"inline_keyboard":[[{"text":"🏠 منوی اصلی","callback_data":"menu:home"}]]}'
+        ;;
+      svc:startpick) send_message "$chat_id" "▶️ انتخاب سرویس برای Start:" "$(svc_buttons_markup 'svc:start:')" ;;
+      svc:stoppick) send_message "$chat_id" "⏹ انتخاب سرویس برای Stop:" "$(svc_buttons_markup 'svc:stop:')" ;;
+      svc:restartpick) send_message "$chat_id" "🔁 انتخاب سرویس برای Restart:" "$(svc_buttons_markup 'svc:restart:')" ;;
+      svc:logpick) send_message "$chat_id" "📄 انتخاب سرویس برای Logs:" "$(svc_buttons_markup 'svc:logs:')" ;;
+      svc:removepick)
+        if is_admin "$chat_id"; then
+          send_message "$chat_id" "🧹 انتخاب سرویس برای Remove:" "$(svc_buttons_markup 'svc:remove:')"
+        else
+          send_message "$chat_id" "⛔ فقط ادمین مجاز است." '{"inline_keyboard":[[{"text":"🏠 منوی اصلی","callback_data":"menu:home"}]]}'
+        fi
+        ;;
+
+      sch:int:*)
+        ensure_scheduler_units
+        interval="${data#sch:int:}"
+        scheduler_set_interval "$interval"
+        send_message "$chat_id" "✅ Interval تنظیم شد: <b>$interval</b>" "$(sched_markup)"
+        ;;
+      sch:enable)
+        ensure_scheduler_units
+        systemctl enable --now kwekha-scheduler.timer
+        send_message "$chat_id" "✅ Scheduler فعال شد." "$(sched_markup)"
+        ;;
+      sch:disable)
+        systemctl disable --now kwekha-scheduler.timer 2>/dev/null || true
+        send_message "$chat_id" "✅ Scheduler غیرفعال شد." "$(sched_markup)"
+        ;;
+      sch:run)
+        /usr/local/bin/kwekha-scheduler && send_message "$chat_id" "✅ اجرا شد (Force restart)." "$(sched_markup)" || send_message "$chat_id" "❌ خطا در اجرا." "$(sched_markup)"
+        ;;
+      sch:status)
+        st="$(systemctl is-enabled kwekha-scheduler.timer 2>/dev/null || true)"
+        active="$(systemctl is-active kwekha-scheduler.timer 2>/dev/null || true)"
+        next="$(systemctl list-timers --all | grep -E "kwekha-scheduler" || true)"
+        send_message "$chat_id" "<b>Scheduler</b>\nEnabled: <b>${st}</b>\nActive: <b>${active}</b>\n<pre>${next}</pre>" "$(sched_markup)"
+        ;;
+
+      svc:*:*)
+        action="$(echo "$data" | cut -d: -f2)"
+        svc="$(echo "$data" | cut -d: -f3-)"
+        case "$action" in
+          start) systemctl start "$svc" ;;
+          stop) systemctl stop "$svc" ;;
+          restart) systemctl restart "$svc" ;;
+          remove)
+            if is_admin "$chat_id"; then
+              systemctl disable --now "$svc" 2>/dev/null || true
+              rm -f "/etc/systemd/system/$svc" 2>/dev/null || true
+              systemctl daemon-reload
+            fi
+            ;;
+          logs)
+            out="$(tail -n 40 "/var/log/kwekha/${svc#gost-kwekha-}.log" 2>/dev/null || echo "(no log file)")"
+            send_message "$chat_id" "<b>Logs</b> ($svc)\n<pre>${out}</pre>" '{"inline_keyboard":[[{"text":"🏠 منوی اصلی","callback_data":"menu:home"}]]}'
+            continue
+            ;;
+        esac
+        send_message "$chat_id" "✅ انجام شد: <b>$action</b> روی <b>$svc</b>" '{"inline_keyboard":[[{"text":"🏠 منوی اصلی","callback_data":"menu:home"}]]}'
+        ;;
+
+      *) send_message "$chat_id" "<b>Kwekha</b>\nانتخاب کنید:" "$(home_markup)" ;;
+    esac
+  done <<< "$ids"
+done

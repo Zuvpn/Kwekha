@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONF="/etc/kwekha/scheduler.conf"
+LOG="/var/log/kwekha/scheduler.log"
+mkdir -p /var/log/kwekha
+
+ts(){ date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+
+MODE="force"
+if [[ -f "$CONF" ]]; then
+  # shellcheck disable=SC1090
+  source "$CONF" || true
+  MODE="${MODE:-force}"
+fi
+
+echo "[$(ts)] scheduler run (MODE=${MODE})" >>"$LOG"
+
+mapfile -t svcs < <(systemctl list-units --type=service --all --no-legend | awk '{print $1}' | grep -E '^gost-kwekha-.*\.service$' || true)
+
+if [[ ${#svcs[@]} -eq 0 ]]; then
+  echo "[$(ts)] no gost-kwekha services found" >>"$LOG"
+  exit 0
+fi
+
+for s in "${svcs[@]}"; do
+  echo "[$(ts)] restart $s" >>"$LOG"
+  systemctl restart "$s" || echo "[$(ts)] FAILED restart $s" >>"$LOG"
+done
+
+echo "[$(ts)] done" >>"$LOG"
